@@ -21,17 +21,13 @@ func (c *Controller) reconcile(ctx context.Context, ingress traffic.Interface) e
 	if ingress.GetDeletionTimestamp() == nil {
 		metadata.AddFinalizer(ingress, traffic.FINALIZER_CASCADE_CLEANUP)
 	}
-	//TODO evaluate where this actually belongs
-	if c.advancedSchedulingEnabled {
-		workload.Migrate(ingress, c.Queue, c.Logger)
-	}
+	workload.Migrate(ingress, c.Queue, c.Logger)
 
 	reconcilers := []traffic.Reconciler{
 		//hostReconciler is first as the others depends on it for the host to be set on the ingress
 		&traffic.HostReconciler{
 			ManagedDomain:          c.domain,
 			Log:                    c.Logger,
-			CustomHostsEnabled:     c.customHostsEnabled,
 			KuadrantClient:         c.kuadrantClient,
 			GetDomainVerifications: c.getDomainVerifications,
 			CreateOrUpdateTraffic:  c.createOrUpdateIngress,

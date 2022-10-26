@@ -20,7 +20,6 @@ jobs:
     env:
       AWS_DNS_PUBLIC_ZONE_ID: ${{ secrets.AWS_DNS_PUBLIC_ZONE_ID }}
       GLBC_DOMAIN: ${{ secrets.GLBC_DOMAIN }}
-      GLBC_ENABLE_CUSTOM_HOSTS: ${{ secrets.GLBC_ENABLE_CUSTOM_HOSTS }}
       GLBC_EXPORT: ${{ secrets.GLBC_EXPORT }}
       GLBC_WORKSPACE: ${{ secrets.GLBC_WORKSPACE }}
       TEST_WORKSPACE: ${{ secrets.TEST_WORKSPACE }}

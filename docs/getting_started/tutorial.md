@@ -49,13 +49,10 @@ Before deploying `kcp` and GLBC, we will want to provide GLBC with AWS credentia
 
    ```bash
    AWS_DNS_PUBLIC_ZONE_ID=Z0668753LU5S8CXOSZR0
-   GLBC_ADVANCED_SCHEDULING=true
    GLBC_DNS_PROVIDER=aws
    GLBC_DOMAIN=cz.hcpapps.net
-   GLBC_ENABLE_CUSTOM_HOSTS=true
    GLBC_EXPORT=glbc-root-kuadrant
    GLBC_LOGICAL_CLUSTER_TARGET=*
-   GLBC_TLS_PROVIDED=true
    GLBC_TLS_PROVIDER=glbc-ca
    GLBC_WORKSPACE=root:kuadrant
    HCG_LE_EMAIL=kuadrant-dev@redhat.com

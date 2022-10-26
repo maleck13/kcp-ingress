@@ -68,7 +68,6 @@ func NewController(config *ControllerConfig) *Controller {
 		glbcWorkspace:                config.GLBCWorkspace,
 		hostResolver:                 hostResolver,
 		hostsWatcher:                 dns.NewHostsWatcher(&base.Logger, hostResolver, dns.DefaultInterval),
-		customHostsEnabled:           config.CustomHostsEnabled,
 		certInformerFactory:          config.CertificateInformer,
 		KCPInformerFactory:           config.KCPInformer,
 	}
@@ -272,8 +271,6 @@ type ControllerConfig struct {
 	Domain                          string
 	CertProvider                    tls.Provider
 	HostResolver                    dns.HostResolver
-	CustomHostsEnabled              bool
-	AdvancedSchedulingEnabled       bool
 	GLBCWorkspace                   logicalcluster.Name
 }
 
@@ -291,7 +288,6 @@ type Controller struct {
 	domain                       string
 	hostResolver                 dns.HostResolver
 	hostsWatcher                 *dns.HostsWatcher
-	customHostsEnabled           bool
 	certInformerFactory          certmaninformer.SharedInformerFactory
 	glbcInformerFactory          informers.SharedInformerFactory
 	KCPInformerFactory           kuadrantInformer.SharedInformerFactory

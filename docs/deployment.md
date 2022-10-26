@@ -98,13 +98,10 @@ kubectl -n kcp-glbc edit configmap kcp-glbc-controller-config
 | Annotation                    | Description | Default value |
 |-------------------------------| ----------- | ------------- |
 | `AWS_DNS_PUBLIC_ZONE_ID`      |  AWS hosted zone id where route53 records will be created (default is dev.hcpapps.net) | Z08652651232L9P84LRSB |
-| `GLBC_ADVANCED_SCHEDULING`    | Enable advanced scheduling | false |
 | `GLBC_DNS_PROVIDER`           |  The dns provider to use, one of [aws, fake] | fake |
 | `GLBC_DOMAIN`                 |  The domain to use when exposing ingresses via glbc | dev.hcpapps.net |
-| `GLBC_ENABLE_CUSTOM_HOSTS`    | Allow custom hosts in glbc managed ingresses | false |
 | `GLBC_EXPORT`                 | The name of the glbc api export to use | glbc-root-kuadrant |
 | `GLBC_LOGICAL_CLUSTER_TARGET` | logical cluster to target | `*` |
-| `GLBC_TLS_PROVIDED`           | Generate TLS certs for glbc managed hosts | false |
 | `GLBC_TLS_PROVIDER`           | The TLS certificate issuer | glbc-ca |
 | `GLBC_WORKSPACE`              | The GLBC workspace| root:kuadrant |
 | `HCG_LE_EMAIL`                | Email address to use during LE cert requests | kuadrant-dev@redhat.com |

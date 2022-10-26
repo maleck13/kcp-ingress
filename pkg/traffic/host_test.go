@@ -2,7 +2,6 @@ package traffic
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"testing"
 
@@ -116,6 +115,9 @@ func TestReconcileHost(t *testing.T) {
 		t.Run(tc.Name, func(t *testing.T) {
 			reconciler := &HostReconciler{
 				ManagedDomain: managedDomain,
+				GetDomainVerifications: func(ctx context.Context, accessor Interface) (*v1.DomainVerificationList, error) {
+					return &v1.DomainVerificationList{}, nil
+				},
 			}
 
 			if err := tc.Validate(buildResult(reconciler, tc.Accessor())); err != nil {
@@ -128,12 +130,11 @@ func TestReconcileHost(t *testing.T) {
 
 func TestProcessCustomHostValidation(t *testing.T) {
 	testCases := []struct {
-		name                 string
-		accessor             Interface
-		domainVerifications  *v1.DomainVerificationList
-		expectedPendingRules Pending
-		expectedRules        []networkingv1.IngressRule
-		expectedTLS          []networkingv1.IngressTLS
+		name                string
+		accessor            Interface
+		domainVerifications *v1.DomainVerificationList
+		expectedRules       []networkingv1.IngressRule
+		expectedTLS         []networkingv1.IngressTLS
 	}{
 		{
 			name: "Empty host",
@@ -163,8 +164,7 @@ func TestProcessCustomHostValidation(t *testing.T) {
 					},
 				},
 			},
-			domainVerifications:  &v1.DomainVerificationList{},
-			expectedPendingRules: Pending{},
+			domainVerifications: &v1.DomainVerificationList{},
 			expectedRules: []networkingv1.IngressRule{
 				{
 					Host: "",
@@ -235,7 +235,6 @@ func TestProcessCustomHostValidation(t *testing.T) {
 					},
 				},
 			},
-			expectedPendingRules: Pending{},
 			expectedRules: []networkingv1.IngressRule{
 				{
 					Host: "test.pb-custom.hcpapps.net",
@@ -306,7 +305,6 @@ func TestProcessCustomHostValidation(t *testing.T) {
 					},
 				},
 			},
-			expectedPendingRules: Pending{},
 			expectedRules: []networkingv1.IngressRule{
 				{
 					Host: "sub.test.pb-custom.hcpapps.net",
@@ -377,22 +375,6 @@ func TestProcessCustomHostValidation(t *testing.T) {
 					},
 				},
 			},
-			expectedPendingRules: Pending{
-				Rules: []networkingv1.IngressRule{
-					{
-						Host: "test.pb-custom.hcpapps.net",
-						IngressRuleValue: networkingv1.IngressRuleValue{
-							HTTP: &networkingv1.HTTPIngressRuleValue{
-								Paths: []networkingv1.HTTPIngressPath{
-									{
-										Path: "/path",
-									},
-								},
-							},
-						},
-					},
-				},
-			},
 			expectedRules: []networkingv1.IngressRule{
 				{
 					Host: "generated.host.net",
@@ -409,7 +391,7 @@ func TestProcessCustomHostValidation(t *testing.T) {
 			},
 		},
 		{
-			name: "TLS section is preserved",
+			name: "Unverfied host TLS section is removed",
 			accessor: &Ingress{
 				Ingress: &networkingv1.Ingress{
 					ObjectMeta: metav1.ObjectMeta{
@@ -423,6 +405,12 @@ func TestProcessCustomHostValidation(t *testing.T) {
 							{
 								Hosts: []string{
 									"test.pb-custom.hcpapps.net",
+								},
+								SecretName: "tls-secret",
+							},
+							{
+								Hosts: []string{
+									"generated.host.net",
 								},
 								SecretName: "tls-secret",
 							},
@@ -459,22 +447,6 @@ func TestProcessCustomHostValidation(t *testing.T) {
 					},
 				},
 			},
-			expectedPendingRules: Pending{
-				Rules: []networkingv1.IngressRule{
-					{
-						Host: "test.pb-custom.hcpapps.net",
-						IngressRuleValue: networkingv1.IngressRuleValue{
-							HTTP: &networkingv1.HTTPIngressRuleValue{
-								Paths: []networkingv1.HTTPIngressPath{
-									{
-										Path: "/path",
-									},
-								},
-							},
-						},
-					},
-				},
-			},
 			expectedRules: []networkingv1.IngressRule{
 				{
 					Host: "generated.host.net",
@@ -492,7 +464,7 @@ func TestProcessCustomHostValidation(t *testing.T) {
 			expectedTLS: []networkingv1.IngressTLS{
 				{
 					Hosts: []string{
-						"test.pb-custom.hcpapps.net",
+						"generated.host.net",
 					},
 					SecretName: "tls-secret",
 				},
@@ -514,23 +486,6 @@ func TestProcessCustomHostValidation(t *testing.T) {
 				},
 			); err != nil {
 				t.Fatal(err)
-			}
-
-			// Assert the expected generated rules matches the
-			// annotation
-			if testCase.expectedPendingRules.Rules != nil {
-				annotation, ok := testCase.accessor.GetAnnotations()[ANNOTATION_PENDING_CUSTOM_HOSTS]
-				if !ok {
-					t.Fatalf("expected GeneratedRulesAnnotation to be set")
-				}
-
-				pendingRules := Pending{}
-				if err := json.Unmarshal(
-					[]byte(annotation),
-					&pendingRules,
-				); err != nil {
-					t.Fatalf("invalid format on PendingRules: %v", err)
-				}
 			}
 
 			// Assert the reconciled rules match the expected rules

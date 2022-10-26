@@ -15,7 +15,6 @@ import (
 type HostReconciler struct {
 	ManagedDomain          string
 	Log                    logr.Logger
-	CustomHostsEnabled     bool
 	KuadrantClient         kuadrantclientv1.ClusterInterface
 	GetDomainVerifications func(ctx context.Context, accessor Interface) (*v1.DomainVerificationList, error)
 	CreateOrUpdateTraffic  CreateOrUpdateTraffic
@@ -35,14 +34,8 @@ func (r *HostReconciler) Reconcile(ctx context.Context, accessor Interface) (Rec
 		// if this is not saved we end up with a new host and the certificate can have the wrong host
 		return ReconcileStatusStop, nil
 	}
-	if !r.CustomHostsEnabled {
-		hcgHost := accessor.GetAnnotations()[ANNOTATION_HCG_HOST]
-		replacedHosts := accessor.ReplaceCustomHosts(hcgHost)
-		if len(replacedHosts) > 0 {
-			metadata.AddAnnotation(accessor, ANNOTATION_HCG_CUSTOM_HOST_REPLACED, fmt.Sprintf(" replaced custom hosts %v to the glbc host due to custom host policy not being allowed", replacedHosts))
-		}
-		return ReconcileStatusContinue, nil
-	}
+	//TODO this should only be set once everything is ready (DNS, and Certificate)
+	//https://github.com/kcp-dev/kcp-glbc/issues/399
 	dvs, err := r.GetDomainVerifications(ctx, accessor)
 	if err != nil {
 		return ReconcileStatusContinue, fmt.Errorf("error getting domain verifications: %v", err)

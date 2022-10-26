@@ -56,7 +56,7 @@ func (r *DnsReconciler) Reconcile(ctx context.Context, accessor Interface) (Reco
 	activeDNSTargetIPs := map[string][]string{}
 	deletingTargetIPs := map[string][]string{}
 
-	targets, err := accessor.GetTargets(ctx, r.DNSLookup)
+	targets, err := accessor.GetDNSTargets(ctx, r.DNSLookup)
 	if err != nil {
 		return ReconcileStatusContinue, err
 	}
@@ -129,6 +129,10 @@ func (r *DnsReconciler) Reconcile(ctx context.Context, accessor Interface) (Reco
 		if _, err = r.UpdateDNS(ctx, copyDNS); err != nil {
 			return ReconcileStatusStop, err
 		}
+	}
+	// Once we know the DNS is creatd up and TMC is enabled for this ingress (IE status is stored in annotations) set the DNS load balancer in the ingress status.
+	if accessor.TMCEnabed() {
+		accessor.SetDNSLBHost(managedHost)
 	}
 
 	return ReconcileStatusContinue, nil

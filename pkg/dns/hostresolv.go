@@ -51,7 +51,7 @@ func (r *ConfigMapHostResolver) LookupIPAddr(ctx context.Context, host string) (
 
 	ipsValue, ok := configMap.Data[host]
 	if !ok {
-		return nil, &gonet.DNSError{Err: fmt.Sprintf("host not found in ConfigMap %s/%s", r.Name, r.Namespace)}
+		return nil, &gonet.DNSError{Err: fmt.Sprintf("host %s not found in ConfigMap %s/%s", host, r.Name, r.Namespace)}
 	}
 
 	var ips []struct {

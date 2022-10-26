@@ -36,7 +36,8 @@ func IngressConfiguration(namespace, name, serviceName, host string) *networking
 						WithService(networkingv1apply.IngressServiceBackend().
 							WithName(serviceName).
 							WithPort(networkingv1apply.ServiceBackendPort().
-								WithName("http"))))))))
+								WithName("http"))))))).
+			WithTLS(networkingv1apply.IngressTLS().WithHosts(host).WithSecretName(host)))
 }
 
 func DeploymentConfiguration(namespace, name string) *appsv1apply.DeploymentApplyConfiguration {

@@ -39,8 +39,8 @@ metadata:
   name: echo
 spec:
   rules:
-    - host: host.whatever.com
-      http:
+    - host: ""
+      http: 
         paths:
           - path: /
             pathType: Prefix
@@ -49,3 +49,4 @@ spec:
                 name: echo
                 port:
                   number: 80
+                    

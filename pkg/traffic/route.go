@@ -42,6 +42,52 @@ func (a *Route) GetHosts() []string {
 	}
 }
 
+func (a *Route) GetSpec() interface{} {
+	return a.Spec
+}
+
+func (a *Route) TMCEnabed() bool {
+	return tmcEnabled(a)
+}
+
+func (a *Route) GetSyncTargets() []string {
+	return getSyncTargets(a)
+}
+
+func (a *Route) SetDNSLBHost(lbHost string) {
+	a.Status.Ingress = []routev1.RouteIngress{
+		{
+			Host: lbHost,
+		},
+	}
+}
+
+func (a *Route) Transform(previous Interface) error {
+	hostPatch := patch{
+		OP:    "replace",
+		Path:  "/host",
+		Value: a.Spec.Host,
+	}
+	tlsPatch := patch{
+		OP:    "replace",
+		Path:  "/tls",
+		Value: a.Spec.TLS,
+	}
+	patches := []patch{hostPatch, tlsPatch}
+	if err := applyTransformPatches(patches, a); err != nil {
+		return err
+	}
+	// ensure we don't modify the actual spec (TODO TMC once transforms are default remove this check)
+	if a.TMCEnabed() {
+		oldSpec, ok := previous.GetSpec().(routev1.RouteSpec)
+		if !ok {
+			return fmt.Errorf("expected the spec to be an RouteSpec %v", previous.GetSpec())
+		}
+		a.Spec = oldSpec
+	}
+	return nil
+}
+
 func (a *Route) AddTLS(host string, secret *corev1.Secret) {
 	if a.Route.Spec.TLS == nil {
 		a.Route.Spec.TLS = &routev1.TLSConfig{}
@@ -56,25 +102,14 @@ func (a *Route) AddTLS(host string, secret *corev1.Secret) {
 func (a *Route) RemoveTLS(hosts []string) {
 	//check the passed in hosts contains the host this is ingress is for
 	for _, host := range hosts {
-		if a.Route.Spec.Host == host {
+		if a.Route.Spec.Host != host {
 			//and if so, remove it
 			a.Route.Spec.TLS = &routev1.TLSConfig{}
 		}
 	}
 }
 
-func (a *Route) ReplaceCustomHosts(managedHost string) []string {
-	if a.Route.Spec.Host != managedHost {
-		replaced := a.Route.Spec.Host
-		a.Route.Spec.Host = managedHost
-
-		a.RemoveTLS([]string{replaced})
-		return []string{replaced}
-	}
-	return []string{}
-}
-
-func (a *Route) GetTargets(ctx context.Context, dnsLookup dnsLookupFunc) (map[logicalcluster.Name]map[string]dns.Target, error) {
+func (a *Route) GetDNSTargets(ctx context.Context, dnsLookup dnsLookupFunc) (map[logicalcluster.Name]map[string]dns.Target, error) {
 	targets := map[logicalcluster.Name]map[string]dns.Target{}
 	statuses, err := a.getStatuses()
 	if err != nil {
@@ -104,7 +139,6 @@ func (a *Route) GetTargets(ctx context.Context, dnsLookup dnsLookupFunc) (map[lo
 
 func (a *Route) ProcessCustomHosts(ctx context.Context, dvs *v1.DomainVerificationList, createOrUpdate CreateOrUpdateTraffic, delete DeleteTraffic) error {
 	generatedHost := metadata.GetAnnotation(a.Route, ANNOTATION_HCG_HOST)
-
 	//don't process custom hosts for shadows
 	if metadata.HasAnnotation(a.Route, ANNOTATION_IS_GLBC_SHADOW) {
 		//reset the host to our generated host

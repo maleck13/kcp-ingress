@@ -28,7 +28,6 @@ func (c *Controller) reconcile(ctx context.Context, route *traffic.Route) error 
 		&traffic.HostReconciler{
 			ManagedDomain:          c.domain,
 			Log:                    c.Logger,
-			CustomHostsEnabled:     c.customHostsEnabled,
 			KuadrantClient:         c.kuadrantClient,
 			GetDomainVerifications: c.getDomainVerifications,
 			CreateOrUpdateTraffic:  c.createOrUpdateRoute,

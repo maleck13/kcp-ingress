@@ -25,8 +25,12 @@ const (
 	TTL                          = 60
 )
 
+// Process this is a temporary solution for advanced scheduling. It will add soft finalizer annotations to a set of objects to delay their deletion.
+// These are only paid attention to if advanced scheduling is on for a synctarget
 func Migrate(obj metav1.Object, queue workqueue.RateLimitingInterface, logger logr.Logger) {
+
 	ensureSoftFinalizers(obj, logger)
+
 	gracefulRemoveSoftFinalizers(obj, queue, logger)
 }
 

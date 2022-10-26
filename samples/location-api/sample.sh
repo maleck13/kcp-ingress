@@ -54,12 +54,15 @@ echo "  - watch -n1 -d 'kubectl get ingress echo -o yaml | yq eval \".metadata\"
 echo
 echo
 
-read -p "Press enter to trigger migration from kcp-cluster-1 to kcp-cluster-2"
+read -p "Press enter to trigger deployment to additional cluster"
 
 echo "creating placement 2 in home workspace"
 kubectl kcp workspace ${HOME_WORKSPACE}
 kubectl create -f ${SCRIPT_DIR}/placement-2.yaml
+
+read -p "Application is now running on two clusters. Press Enter to migrate from cluster 1 to cluster only run on cluster 2"
 kubectl delete placement placement-1
+
 
 read -p "Press enter to reset cluster"
 kubectl delete -f ${SCRIPT_DIR}/../echo-service/echo.yaml

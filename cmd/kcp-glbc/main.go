@@ -65,14 +65,10 @@ var options struct {
 	GLBCWorkspace string
 	// The kcp logical cluster
 	LogicalClusterTarget string
-	// Whether to generate TLS certificates for hosts
-	TLSProviderEnabled bool
 	// The TLS certificate issuer
 	TLSProvider string
 	// The base domain
 	Domain string
-	// Whether custom hosts are permitted
-	EnableCustomHosts bool
 	// The DNS provider
 	DNSProvider string
 	// The AWS Route53 region
@@ -81,8 +77,6 @@ var options struct {
 	MonitoringPort int
 	// The glbc exports to use
 	ExportName string
-
-	AdvancedScheduling bool
 }
 
 type APIExportClusterInformers struct {
@@ -98,15 +92,10 @@ func init() {
 	flagSet.StringVar(&options.GLBCWorkspace, "glbc-workspace", env.GetEnvString("GLBC_WORKSPACE", "root:kuadrant"), "The GLBC workspace")
 	flagSet.StringVar(&options.ExportName, "glbc-export", env.GetEnvString("GLBC_EXPORT", "glbc-root-kuadrant"), "comma separated list of glbc APIExport names")
 	flagSet.StringVar(&options.LogicalClusterTarget, "logical-cluster", env.GetEnvString("GLBC_LOGICAL_CLUSTER_TARGET", "*"), "set the target logical cluster")
-	// TLS certificate issuance options
-	flagSet.BoolVar(&options.TLSProviderEnabled, "glbc-tls-provided", env.GetEnvBool("GLBC_TLS_PROVIDED", true), "Whether to generate TLS certificates for hosts")
 	flagSet.StringVar(&options.TLSProvider, "glbc-tls-provider", env.GetEnvString("GLBC_TLS_PROVIDER", "glbc-ca"), "The TLS certificate issuer, one of [glbc-ca, le-staging, le-production]")
 	// DNS management options
 	flagSet.StringVar(&options.Domain, "domain", env.GetEnvString("GLBC_DOMAIN", "dev.hcpapps.net"), "The domain to use to expose ingresses")
-	flagSet.BoolVar(&options.EnableCustomHosts, "enable-custom-hosts", env.GetEnvBool("GLBC_ENABLE_CUSTOM_HOSTS", false), "Flag to enable hosts to be custom")
 	flag.StringVar(&options.DNSProvider, "dns-provider", env.GetEnvString("GLBC_DNS_PROVIDER", "fake"), "The DNS provider being used [aws, fake]")
-
-	flagSet.BoolVar(&options.AdvancedScheduling, "advanced-scheduling", env.GetEnvBool("GLBC_ADVANCED_SCHEDULING", false), "enabled the GLBC advanced scheduling integration")
 
 	// // AWS Route53 options
 	flag.StringVar(&options.Region, "region", env.GetEnvString("AWS_REGION", "eu-central-1"), "the region we should target with AWS clients")
@@ -167,35 +156,33 @@ func main() {
 	certificateInformerFactory := certmaninformer.NewSharedInformerFactoryWithOptions(certClient, resyncPeriod, certmaninformer.WithNamespace(namespace))
 
 	var certProvider tls.Provider
-	if options.TLSProviderEnabled {
 
-		// TLSProvider is mandatory when TLS is enabled
-		if options.TLSProvider == "" {
-			exitOnError(fmt.Errorf("TLS Provider not specified"), "Failed to create cert provider")
-		}
-
-		var tlsCertProvider = tls.CertProvider(options.TLSProvider)
-
-		log.Logger.Info("Instantiating TLS certificate provider", "issuer", tlsCertProvider)
-
-		certProvider, err = tls.NewCertManager(tls.CertManagerConfig{
-			DNSValidator:  tls.DNSValidatorRoute53,
-			CertClient:    certClient,
-			CertProvider:  tlsCertProvider,
-			Region:        options.Region,
-			K8sClient:     kubeClient,
-			ValidDomains:  []string{options.Domain},
-			CertificateNS: namespace,
-		})
-		exitOnError(err, "Failed to create cert provider")
-
-		ingress.InitMetrics(certProvider)
-		route.InitMetrics()
-		traffic.InitMetrics(certProvider)
-
-		_, err := certProvider.IssuerExists(ctx)
-		exitOnError(err, "Failed cert provider issuer check")
+	// TLSProvider is mandatory when TLS is enabled
+	if options.TLSProvider == "" {
+		exitOnError(fmt.Errorf("TLS Provider not specified"), "Failed to create cert provider")
 	}
+
+	var tlsCertProvider = tls.CertProvider(options.TLSProvider)
+
+	log.Logger.Info("Instantiating TLS certificate provider", "issuer", tlsCertProvider)
+
+	certProvider, err = tls.NewCertManager(tls.CertManagerConfig{
+		DNSValidator:  tls.DNSValidatorRoute53,
+		CertClient:    certClient,
+		CertProvider:  tlsCertProvider,
+		Region:        options.Region,
+		K8sClient:     kubeClient,
+		ValidDomains:  []string{options.Domain},
+		CertificateNS: namespace,
+	})
+	exitOnError(err, "Failed to create cert provider")
+
+	ingress.InitMetrics(certProvider)
+	route.InitMetrics()
+	traffic.InitMetrics(certProvider)
+
+	_, err = certProvider.IssuerExists(ctx)
+	exitOnError(err, "Failed cert provider issuer check")
 
 	glbcKubeInformerFactory := informers.NewSharedInformerFactoryWithOptions(kubeClient, time.Minute, informers.WithNamespace(namespace))
 
@@ -253,8 +240,6 @@ func main() {
 			Domain:                          options.Domain,
 			CertProvider:                    certProvider,
 			HostResolver:                    dnsClient,
-			CustomHostsEnabled:              options.EnableCustomHosts,
-			AdvancedSchedulingEnabled:       options.AdvancedScheduling,
 			GLBCWorkspace:                   logicalcluster.New(options.GLBCWorkspace),
 		})
 
@@ -264,19 +249,17 @@ func main() {
 			ControllerConfig: &reconciler.ControllerConfig{
 				NameSuffix: name,
 			},
-			KCPKubeClient:             kcpKubeClient,
-			KubeClient:                kubeClient,
-			DnsRecordClient:           kcpKuadrantClient,
-			KuadrantInformer:          kcpKuadrantInformerFactory,
-			KCPSharedInformerFactory:  kcpKubeInformerFactory,
-			CertificateInformer:       certificateInformerFactory,
-			GlbcInformerFactory:       glbcKubeInformerFactory,
-			Domain:                    options.Domain,
-			CertProvider:              certProvider,
-			HostResolver:              dnsClient,
-			AdvancedSchedulingEnabled: options.AdvancedScheduling,
-			CustomHostsEnabled:        options.EnableCustomHosts,
-			GLBCWorkspace:             logicalcluster.New(options.GLBCWorkspace),
+			KCPKubeClient:            kcpKubeClient,
+			KubeClient:               kubeClient,
+			DnsRecordClient:          kcpKuadrantClient,
+			KuadrantInformer:         kcpKuadrantInformerFactory,
+			KCPSharedInformerFactory: kcpKubeInformerFactory,
+			CertificateInformer:      certificateInformerFactory,
+			GlbcInformerFactory:      glbcKubeInformerFactory,
+			Domain:                   options.Domain,
+			CertProvider:             certProvider,
+			HostResolver:             dnsClient,
+			GLBCWorkspace:            logicalcluster.New(options.GLBCWorkspace),
 		})
 		controllers = append(controllers, ingressController)
 
@@ -323,9 +306,8 @@ func main() {
 		})
 		exitOnError(err, "Failed to create Deployment controller")
 
-		// Secret controller should not have more than one instance and is only needed if using advanced scheduling
-		if isControllerLeader && options.AdvancedScheduling {
-			log.Logger.Info("advanced scheduling enabled, starting secrets controllers")
+		// Secret controller should not have more than one instance
+		if isControllerLeader {
 			secretController, err := secret.NewController(&secret.ControllerConfig{
 				ControllerConfig: &reconciler.ControllerConfig{
 					NameSuffix: name,
@@ -338,11 +320,8 @@ func main() {
 			controllers = append(controllers, secretController)
 		}
 
-		if options.AdvancedScheduling {
-			log.Logger.Info("advanced scheduling enabled, starting deployment and service controllers")
-			controllers = append(controllers, deploymentController)
-			controllers = append(controllers, serviceController)
-		}
+		controllers = append(controllers, deploymentController)
+		controllers = append(controllers, serviceController)
 
 		apiExportClusterInformers = append(apiExportClusterInformers, *clusterInformers)
 	}
@@ -358,12 +337,10 @@ func main() {
 		clusterInformers.KCPDynamicInformerFactory.WaitForCacheSync(ctx.Done())
 	}
 
-	if options.TLSProviderEnabled {
-		certificateInformerFactory.Start(ctx.Done())
-		certificateInformerFactory.WaitForCacheSync(ctx.Done())
-		glbcKubeInformerFactory.Start(ctx.Done())
-		glbcKubeInformerFactory.WaitForCacheSync(ctx.Done())
-	}
+	certificateInformerFactory.Start(ctx.Done())
+	certificateInformerFactory.WaitForCacheSync(ctx.Done())
+	glbcKubeInformerFactory.Start(ctx.Done())
+	glbcKubeInformerFactory.WaitForCacheSync(ctx.Done())
 
 	for _, controller := range controllers {
 		start(gCtx, controller)

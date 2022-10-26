@@ -154,12 +154,11 @@ func (r *CertificateReconciler) Reconcile(ctx context.Context, accessor Interfac
 		basereconciler.LABEL_HCG_MANAGED: "true",
 	}
 	key, err := cache.MetaNamespaceKeyFunc(accessor)
-
-	managedHost := accessor.GetAnnotations()[ANNOTATION_HCG_HOST]
-
 	if err != nil {
 		return ReconcileStatusStop, err
 	}
+	managedHost := accessor.GetAnnotations()[ANNOTATION_HCG_HOST]
+
 	tlsSecretName := TLSSecretName(accessor)
 	//set the accessor key on the certificate to help us with locating the accessor later
 	annotations[ANNOTATION_TRAFFIC_KEY] = key
@@ -199,7 +198,6 @@ func (r *CertificateReconciler) Reconcile(ctx context.Context, accessor Interfac
 				if err != nil {
 					return ReconcileStatusStop, fmt.Errorf("certificate reconciler: error getting certificate status error: %v", err.Error())
 				}
-				//NB we stop reconcile until the certificate is ready. We don't want things like DNS set up until the certificate is ready
 				metadata.AddAnnotation(accessor, ANNOTATION_CERTIFICATE_STATE, string(status))
 				return ReconcileStatusContinue, nil
 			}
@@ -225,13 +223,10 @@ func (r *CertificateReconciler) Reconcile(ctx context.Context, accessor Interfac
 			return ReconcileStatusStop, fmt.Errorf("certificate reconciler: error copying secret error: %v", err.Error())
 		}
 	}
-	if err != nil && !errors.IsAlreadyExists(err) {
-		return ReconcileStatusStop, fmt.Errorf("certificate reconciler: error creating certificate error: %v", err.Error())
-	}
-
 	// set tls setting on the accessor
 	certSecret, err := r.GetSecret(ctx, tlsSecretName, accessor.GetNamespace(), accessor.GetLogicalCluster())
 	if err != nil {
+		// don't proceed until the secret is present. We want TLS to be available before we make the ingress accessible via DNS
 		return ReconcileStatusStop, fmt.Errorf("certificate reconciler: error getting secret to set on accessor error: %v", err.Error())
 	}
 	accessor.AddTLS(certReq.Host, certSecret)

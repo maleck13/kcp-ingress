@@ -9,6 +9,7 @@ import (
 	"github.com/kcp-dev/logicalcluster/v2"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/strings/slices"
 
@@ -25,6 +26,39 @@ func NewIngress(i *networkingv1.Ingress) *Ingress {
 
 type Ingress struct {
 	*networkingv1.Ingress
+}
+
+func (a *Ingress) SetDNSLBHost(host string) {
+	a.Ingress.Status.LoadBalancer = corev1.LoadBalancerStatus{
+		Ingress: []corev1.LoadBalancerIngress{
+			{
+				Hostname: host,
+			},
+		},
+	}
+
+}
+
+func (a *Ingress) GetSyncTargets() []string {
+	return getSyncTargets(a.Ingress)
+}
+
+// TMCEnabed this is a very temporary solution to allow us to work with both advanced and none advanced scheduling clusters. IT SHOULD BE REMOVED ASAP
+func (a *Ingress) TMCEnabed() bool {
+	// check the annotations for status
+	if tmcEnabled(a) {
+		return true
+	}
+	enabled := true
+	//once the status gets set to something other than the glbc provided host we are sure it is not advanced scheduling
+	if len(a.Status.LoadBalancer.Ingress) == 1 {
+		if a.Status.LoadBalancer.Ingress[0].Hostname != "" {
+			enabled = a.Status.LoadBalancer.Ingress[0].Hostname == a.Annotations[ANNOTATION_HCG_HOST]
+		} else {
+			enabled = a.Status.LoadBalancer.Ingress[0].IP == ""
+		}
+	}
+	return enabled
 }
 
 func (a *Ingress) GetKind() string {
@@ -61,37 +95,21 @@ func (a *Ingress) AddTLS(host string, secret *corev1.Secret) {
 func (a *Ingress) RemoveTLS(hosts []string) {
 	for _, removeHost := range hosts {
 		for i, tls := range a.Spec.TLS {
-			hosts := tls.Hosts
+			tlsHosts := tls.Hosts
 			for j, host := range tls.Hosts {
 				if host == removeHost {
-					hosts = append(hosts[:j], hosts[j+1:]...)
+					tlsHosts = append(hosts[:j], hosts[j+1:]...)
 				}
 			}
 			// if there are no hosts remaining remove the entry for TLS
-			if len(hosts) == 0 {
+			if len(tlsHosts) == 0 {
 				a.Spec.TLS = append(a.Spec.TLS[:i], a.Spec.TLS[i+1:]...)
-			} else {
-				a.Spec.TLS[i].Hosts = hosts
 			}
 		}
 	}
 }
 
-func (a *Ingress) ReplaceCustomHosts(managedHost string) []string {
-	var customHosts []string
-	for i, rule := range a.Spec.Rules {
-		if rule.Host != managedHost {
-			a.Spec.Rules[i].Host = managedHost
-			customHosts = append(customHosts, rule.Host)
-		}
-	}
-	// clean up replaced hosts from the tls list
-	a.RemoveTLS(customHosts)
-
-	return customHosts
-}
-
-func (a *Ingress) GetTargets(ctx context.Context, dnsLookup dnsLookupFunc) (map[logicalcluster.Name]map[string]dns.Target, error) {
+func (a *Ingress) GetDNSTargets(ctx context.Context, dnsLookup dnsLookupFunc) (map[logicalcluster.Name]map[string]dns.Target, error) {
 	statuses, err := a.getStatuses()
 	if err != nil {
 		return nil, err
@@ -131,6 +149,45 @@ func (a *Ingress) targetsFromStatus(ctx context.Context, status networkingv1.Ing
 	return targets, nil
 }
 
+func (a *Ingress) GetSpec() interface{} {
+	return a.Spec
+}
+
+func (a *Ingress) Transform(old Interface) error {
+	oldIngress := old.(*Ingress)
+	patches := []patch{}
+	if !equality.Semantic.DeepEqual(a.Spec.Rules, oldIngress.Spec.Rules) {
+		rulesPatch := patch{
+			OP:    "replace",
+			Path:  "/rules",
+			Value: a.Spec.Rules,
+		}
+		patches = append(patches, rulesPatch)
+	}
+	if !equality.Semantic.DeepEqual(a.Spec.TLS, oldIngress.Spec.TLS) {
+		tlsPatch := patch{
+			OP:    "replace",
+			Path:  "/tls",
+			Value: a.Spec.TLS,
+		}
+		patches = append(patches, tlsPatch)
+	}
+	if err := applyTransformPatches(patches, a); err != nil {
+		return err
+	}
+	// ensure we don't modify the actual spec (TODO TMC once transforms are default remove this check)
+	if a.TMCEnabed() {
+		// we always assume tmc is enabled and do this until we are sure it is not enabled. We will be sure before the DNS is actually published as the check is based on status
+		oldSpec, ok := old.GetSpec().(networkingv1.IngressSpec)
+		if !ok {
+			return fmt.Errorf("expected the spec to be an ingress spec %v", old.GetSpec())
+		}
+		a.Spec = oldSpec
+	}
+	return nil
+
+}
+
 func (a *Ingress) getStatuses() (map[logicalcluster.Name]networkingv1.IngressStatus, error) {
 	statuses := map[logicalcluster.Name]networkingv1.IngressStatus{}
 	for k, v := range a.Annotations {
@@ -151,19 +208,21 @@ func (a *Ingress) getStatuses() (map[logicalcluster.Name]networkingv1.IngressSta
 	}
 
 	cluster := logicalcluster.From(a)
-	statuses[cluster] = a.Status
+	if !tmcEnabled(a) {
+		// when tmc enabled we don't want this status
+		statuses[cluster] = a.Status
+	}
 	return statuses, nil
 }
 
 func (a *Ingress) ProcessCustomHosts(_ context.Context, dvs *v1.DomainVerificationList, _ CreateOrUpdateTraffic, _ DeleteTraffic) error {
 	generatedHost, ok := a.GetAnnotations()[ANNOTATION_HCG_HOST]
+	var unverifiedRules []networkingv1.IngressRule
+	var verifiedRules []networkingv1.IngressRule
+	replacedHosts := []string{}
 	if !ok || generatedHost == "" {
 		return ErrGeneratedHostMissing
 	}
-
-	var unverifiedRules []networkingv1.IngressRule
-	var verifiedRules []networkingv1.IngressRule
-
 	//find any rules in the spec that are for unverifiedHosts that are not verified
 	for _, rule := range a.Spec.Rules {
 		//ignore any rules for generated unverifiedHosts (these are recalculated later)
@@ -184,48 +243,71 @@ func (a *Ingress) ProcessCustomHosts(_ context.Context, dvs *v1.DomainVerificati
 		generatedHostRule.Host = generatedHost
 		verifiedRules = append(verifiedRules, generatedHostRule)
 	}
+
+	if len(unverifiedRules) > 0 {
+		metadata.AddLabel(a, LABEL_HAS_PENDING_HOSTS, "true")
+
+		for _, uh := range unverifiedRules {
+			replacedHosts = append(replacedHosts, uh.Host)
+		}
+		metadata.AddAnnotation(a, ANNOTATION_HCG_CUSTOM_HOST_REPLACED, fmt.Sprintf(" replaced custom hosts as they are not verfified %v", replacedHosts))
+	} else {
+		metadata.RemoveLabel(a, LABEL_HAS_PENDING_HOSTS)
+		metadata.RemoveAnnotation(a, ANNOTATION_HCG_CUSTOM_HOST_REPLACED)
+	}
+	// nuke any pending hosts as these will be in the spec when tmc enabled
+	if a.TMCEnabed() {
+		delete(a.Annotations, ANNOTATION_PENDING_CUSTOM_HOSTS)
+	}
+	//This needs to be done before we check the pending
 	a.Spec.Rules = verifiedRules
+	a.RemoveTLS(replacedHosts)
 
-	pending := &Pending{}
-	var preservedPendingRules []networkingv1.IngressRule
+	if !a.TMCEnabed() {
+		//TODO(TMC remove below code when TMC is the default)
 
-	//test all the rules in the pending rules annotation to see if they are verified now
-	pendingRulesRaw, exists := a.GetAnnotations()[ANNOTATION_PENDING_CUSTOM_HOSTS]
-	if exists {
-		if pendingRulesRaw != "" {
-			err := json.Unmarshal([]byte(pendingRulesRaw), pending)
+		pending := &Pending{}
+		var preservedPendingRules []networkingv1.IngressRule
+
+		//test all the rules in the pending rules annotation to see if they are verified now
+		pendingRulesRaw, exists := a.GetAnnotations()[ANNOTATION_PENDING_CUSTOM_HOSTS]
+		if exists {
+			if pendingRulesRaw != "" {
+				err := json.Unmarshal([]byte(pendingRulesRaw), pending)
+				if err != nil {
+					return err
+				}
+			}
+			for _, pendingRule := range pending.Rules {
+				//recalculate the generatedhost rule in the spec
+				generatedHostRule := *pendingRule.DeepCopy()
+				generatedHostRule.Host = generatedHost
+				a.Spec.Rules = append(a.Spec.Rules, generatedHostRule)
+
+				//check against domainverification status
+				if IsDomainVerified(pendingRule.Host, dvs.Items) || pendingRule.Host == "" {
+					//add the rule to the spec
+					a.Spec.Rules = append(a.Spec.Rules, pendingRule)
+				} else {
+					preservedPendingRules = append(preservedPendingRules, pendingRule)
+				}
+			}
+		}
+		//put the new unverified rules in the list of pending rules and update the annotation
+		pending.Rules = append(preservedPendingRules, unverifiedRules...)
+		if len(pending.Rules) > 0 {
+			metadata.AddLabel(a, LABEL_HAS_PENDING_HOSTS, "true")
+			newAnnotation, err := json.Marshal(pending)
 			if err != nil {
 				return err
 			}
+			metadata.AddAnnotation(a, ANNOTATION_PENDING_CUSTOM_HOSTS, string(newAnnotation))
+			return nil
 		}
-		for _, pendingRule := range pending.Rules {
-			//recalculate the generatedhost rule in the spec
-			generatedHostRule := *pendingRule.DeepCopy()
-			generatedHostRule.Host = generatedHost
-			a.Spec.Rules = append(a.Spec.Rules, generatedHostRule)
-
-			//check against domainverification status
-			if IsDomainVerified(pendingRule.Host, dvs.Items) || pendingRule.Host == "" {
-				//add the rule to the spec
-				a.Spec.Rules = append(a.Spec.Rules, pendingRule)
-			} else {
-				preservedPendingRules = append(preservedPendingRules, pendingRule)
-			}
-		}
-	}
-	//put the new unverified rules in the list of pending rules and update the annotation
-	pending.Rules = append(preservedPendingRules, unverifiedRules...)
-	if len(pending.Rules) > 0 {
-		metadata.AddLabel(a, LABEL_HAS_PENDING_HOSTS, "true")
-		newAnnotation, err := json.Marshal(pending)
-		if err != nil {
-			return err
-		}
-		metadata.AddAnnotation(a, ANNOTATION_PENDING_CUSTOM_HOSTS, string(newAnnotation))
+		metadata.RemoveLabel(a, LABEL_HAS_PENDING_HOSTS)
+		metadata.RemoveAnnotation(a, ANNOTATION_PENDING_CUSTOM_HOSTS)
 		return nil
 	}
-	metadata.RemoveLabel(a, LABEL_HAS_PENDING_HOSTS)
-	metadata.RemoveAnnotation(a, ANNOTATION_PENDING_CUSTOM_HOSTS)
 	return nil
 }
 
@@ -241,5 +323,5 @@ func (a *Ingress) GetNamespaceName() types.NamespacedName {
 }
 
 func (a *Ingress) String() string {
-	return fmt.Sprintf("logical cluster: %v, kind: %v, namespace/name: %v", a.GetLogicalCluster(), a.GetKind(), a.GetNamespaceName())
+	return fmt.Sprintf("logical cluster: %v, kind: %v, namespace/name: %v, tmc enabled : %v ", a.GetLogicalCluster(), a.GetKind(), a.GetNamespaceName(), a.TMCEnabed())
 }

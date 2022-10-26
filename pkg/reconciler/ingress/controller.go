@@ -53,20 +53,18 @@ func NewController(config *ControllerConfig) *Controller {
 
 	base := basereconciler.NewController(controllerName, queue)
 	c := &Controller{
-		Controller:                base,
-		kubeClient:                config.KubeClient,
-		KCPKubeClient:             config.KCPKubeClient,
-		certProvider:              config.CertProvider,
-		sharedInformerFactory:     config.KCPSharedInformerFactory,
-		glbcInformerFactory:       config.GlbcInformerFactory,
-		kuadrantClient:            config.DnsRecordClient,
-		domain:                    config.Domain,
-		hostResolver:              hostResolver,
-		hostsWatcher:              dns.NewHostsWatcher(&base.Logger, hostResolver, dns.DefaultInterval),
-		customHostsEnabled:        config.CustomHostsEnabled,
-		certInformerFactory:       config.CertificateInformer,
-		KuadrantInformerFactory:   config.KuadrantInformer,
-		advancedSchedulingEnabled: config.AdvancedSchedulingEnabled,
+		Controller:              base,
+		kubeClient:              config.KubeClient,
+		KCPKubeClient:           config.KCPKubeClient,
+		certProvider:            config.CertProvider,
+		sharedInformerFactory:   config.KCPSharedInformerFactory,
+		glbcInformerFactory:     config.GlbcInformerFactory,
+		kuadrantClient:          config.DnsRecordClient,
+		domain:                  config.Domain,
+		hostResolver:            hostResolver,
+		hostsWatcher:            dns.NewHostsWatcher(&base.Logger, hostResolver, dns.DefaultInterval),
+		certInformerFactory:     config.CertificateInformer,
+		KuadrantInformerFactory: config.KuadrantInformer,
 	}
 	c.Process = c.process
 	c.hostsWatcher.OnChange = c.Enqueue
@@ -242,39 +240,35 @@ func NewController(config *ControllerConfig) *Controller {
 
 type ControllerConfig struct {
 	*basereconciler.ControllerConfig
-	KCPKubeClient             kubernetes.ClusterInterface
-	KubeClient                kubernetes.Interface
-	DnsRecordClient           kuadrantclientv1.ClusterInterface
-	KCPSharedInformerFactory  informers.SharedInformerFactory
-	CertificateInformer       certmaninformer.SharedInformerFactory
-	GlbcInformerFactory       informers.SharedInformerFactory
-	KuadrantInformer          kuadrantInformer.SharedInformerFactory
-	Domain                    string
-	CertProvider              tls.Provider
-	HostResolver              dns.HostResolver
-	CustomHostsEnabled        bool
-	AdvancedSchedulingEnabled bool
-	GLBCWorkspace             logicalcluster.Name
+	KCPKubeClient            kubernetes.ClusterInterface
+	KubeClient               kubernetes.Interface
+	DnsRecordClient          kuadrantclientv1.ClusterInterface
+	KCPSharedInformerFactory informers.SharedInformerFactory
+	CertificateInformer      certmaninformer.SharedInformerFactory
+	GlbcInformerFactory      informers.SharedInformerFactory
+	KuadrantInformer         kuadrantInformer.SharedInformerFactory
+	Domain                   string
+	CertProvider             tls.Provider
+	HostResolver             dns.HostResolver
+	GLBCWorkspace            logicalcluster.Name
 }
 
 type Controller struct {
 	*basereconciler.Controller
-	kubeClient                kubernetes.Interface
-	KCPKubeClient             kubernetes.ClusterInterface
-	sharedInformerFactory     informers.SharedInformerFactory
-	kuadrantClient            kuadrantclientv1.ClusterInterface
-	indexer                   cache.Indexer
-	ingressLister             networkingv1lister.IngressLister
-	certificateLister         certmanlister.CertificateLister
-	certProvider              tls.Provider
-	domain                    string
-	hostResolver              dns.HostResolver
-	hostsWatcher              *dns.HostsWatcher
-	customHostsEnabled        bool
-	advancedSchedulingEnabled bool
-	certInformerFactory       certmaninformer.SharedInformerFactory
-	glbcInformerFactory       informers.SharedInformerFactory
-	KuadrantInformerFactory   kuadrantInformer.SharedInformerFactory
+	kubeClient              kubernetes.Interface
+	KCPKubeClient           kubernetes.ClusterInterface
+	sharedInformerFactory   informers.SharedInformerFactory
+	kuadrantClient          kuadrantclientv1.ClusterInterface
+	indexer                 cache.Indexer
+	ingressLister           networkingv1lister.IngressLister
+	certificateLister       certmanlister.CertificateLister
+	certProvider            tls.Provider
+	domain                  string
+	hostResolver            dns.HostResolver
+	hostsWatcher            *dns.HostsWatcher
+	certInformerFactory     certmaninformer.SharedInformerFactory
+	glbcInformerFactory     informers.SharedInformerFactory
+	KuadrantInformerFactory kuadrantInformer.SharedInformerFactory
 }
 
 func (c *Controller) enqueueIngressByKey(key string) bool {
@@ -305,29 +299,35 @@ func (c *Controller) process(ctx context.Context, key string) error {
 		return nil
 	}
 
-	current := object.(*networkingv1.Ingress)
-	target := current.DeepCopy()
-	accessor := traffic.NewIngress(target)
-	err = c.reconcile(ctx, accessor)
+	currentState := object.(*networkingv1.Ingress)
+	targetState := currentState.DeepCopy()
+	targetStateReadWriter := traffic.NewIngress(targetState)
+	currentStateReader := traffic.NewIngress(currentState)
+	err = c.reconcile(ctx, targetStateReadWriter)
 	if err != nil {
 		return err
 	}
-	if !equality.Semantic.DeepEqual(current, target) {
+
+	if !equality.Semantic.DeepEqual(currentState, targetState) {
+		// our ingress object is now in the correct state, before we commit lets apply any changes via a transform
+		if err := targetStateReadWriter.Transform(currentStateReader); err != nil {
+			return err
+		}
 		c.Logger.V(3).Info("attempting update of changed ingress ", "ingress key ", key)
-		_, err := c.KCPKubeClient.Cluster(logicalcluster.From(target)).NetworkingV1().Ingresses(target.Namespace).Update(ctx, target, metav1.UpdateOptions{})
-		// TODO PB 09/09/2022 remove this if statement when this bug is resolved: https://github.com/kcp-dev/kcp/issues/1891
-		if err != nil && strings.Contains(err.Error(), "the object has been modified") {
-			refresh, refreshErr := c.KCPKubeClient.Cluster(logicalcluster.From(target)).NetworkingV1().Ingresses(target.Namespace).Get(ctx, target.Name, metav1.GetOptions{})
-			// error getting refresh object, return original error
-			if refreshErr != nil {
+		_, err = c.KCPKubeClient.Cluster(logicalcluster.From(targetState)).NetworkingV1().Ingresses(targetState.Namespace).Update(ctx, targetState, metav1.UpdateOptions{})
+		if err != nil {
+			return err
+		}
+	}
+	if targetStateReadWriter.TMCEnabed() {
+		if !equality.Semantic.DeepEqual(currentState.Status, targetState.Status) {
+			c.Logger.V(3).Info("attempting update of status for ingress ", "ingress key ", key)
+			_, err = c.KCPKubeClient.Cluster(logicalcluster.From(targetState)).NetworkingV1().Ingresses(targetState.Namespace).UpdateStatus(ctx, targetState, metav1.UpdateOptions{})
+			if err != nil {
 				return err
 			}
-			target.ResourceVersion = refresh.ResourceVersion
-			_, err = c.KCPKubeClient.Cluster(logicalcluster.From(target)).NetworkingV1().Ingresses(target.Namespace).Update(ctx, target, metav1.UpdateOptions{})
 		}
-		return err
 	}
-
 	return nil
 }
 
@@ -356,7 +356,19 @@ func (c *Controller) ingressesFromDomainVerification(obj interface{}) ([]*networ
 
 	ingressesToEnqueue := []*networkingv1.Ingress{}
 
+	// TODO this can be removed once advanced scheduling is the norm
 	for _, ingress := range ingressList {
+		accessor := traffic.NewIngress(ingress)
+		if accessor.TMCEnabed() {
+			// look at the spec
+			for _, rule := range ingress.Spec.Rules {
+				if HostMatches(rule.Host, domain) {
+					ingressesToEnqueue = append(ingressesToEnqueue, ingress)
+				}
+			}
+			return ingressesToEnqueue, nil
+		}
+		//TODO(cbrookes) below can be removed once tmc tansformations and advanced scheduling is the default
 		pendingRulesAnnotation, ok := ingress.Annotations[traffic.ANNOTATION_PENDING_CUSTOM_HOSTS]
 		if !ok {
 			continue

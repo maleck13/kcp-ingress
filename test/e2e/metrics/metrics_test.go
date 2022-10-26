@@ -17,30 +17,21 @@ limitations under the License.
 package metrics
 
 import (
-	"encoding/json"
-	"fmt"
 	"math"
-	"os"
-	"strings"
 	"testing"
 	"time"
-
-	workload "github.com/kcp-dev/kcp/pkg/apis/workload/v1alpha1"
 
 	"github.com/kuadrant/kcp-glbc/pkg/traffic"
 
 	. "github.com/onsi/gomega"
 	. "github.com/onsi/gomega/gstruct"
-	"github.com/onsi/gomega/types"
 
 	prometheus "github.com/prometheus/client_model/go"
 
-	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/kcp-dev/logicalcluster/v2"
 
-	kuadrantv1 "github.com/kuadrant/kcp-glbc/pkg/apis/kuadrant/v1"
 	. "github.com/kuadrant/kcp-glbc/test/support"
 )
 
@@ -138,73 +129,16 @@ func TestMetrics(t *testing.T) {
 			},
 		)),
 	))
-	secretName := fmt.Sprintf("hcg-tls-ingress-%s", name)
-
-	// Wait until the Ingress is reconciled with the load balancer Ingresses
+	// Wait until the Ingress is reconciled with the load balancer set. This is how we know the ingress is considered ready
 	test.Eventually(Ingress(test, namespace, name)).WithTimeout(TestTimeoutMedium).Should(And(
 		// Host spec
 		WithTransform(Annotations, And(
 			HaveKey(traffic.ANNOTATION_HCG_HOST),
-			HaveKey(traffic.ANNOTATION_PENDING_CUSTOM_HOSTS),
 		)),
-		WithTransform(Labels, And(
-			HaveKey(traffic.LABEL_HAS_PENDING_HOSTS),
-		)),
-		// Rules spec
-		Satisfy(HostsEqualsToGeneratedHost),
-		// TLS certificate spec
-		Satisfy(HasTLSSecretForGeneratedHost(secretName)),
 		// Load balancer status
 		WithTransform(LoadBalancerIngresses, HaveLen(1)),
+		Satisfy(LBHostEqualToGeneratedHost),
 	))
-
-	ingress := GetIngress(test, namespace, name)
-
-	// Check the TLS Secret
-	test.Eventually(Secret(test, namespace, secretName)).WithTimeout(TestTimeoutMedium).Should(
-		WithTransform(Certificate, PointTo(
-			MatchFields(IgnoreExtras, map[string]types.GomegaMatcher{
-				"DNSNames": ConsistOf(ingress.Annotations[traffic.ANNOTATION_HCG_HOST]),
-			}),
-		)),
-	)
-
-	zoneID := os.Getenv("AWS_DNS_PUBLIC_ZONE_ID")
-	test.Expect(zoneID).NotTo(BeNil())
-
-	ingressStatus := &networkingv1.IngressStatus{}
-	for a, v := range ingress.Annotations {
-		if strings.Contains(a, workload.InternalClusterStatusAnnotationPrefix) {
-			err = json.Unmarshal([]byte(v), &ingressStatus)
-			break
-		}
-	}
-	test.Expect(err).NotTo(HaveOccurred())
-
-	// Check a DNSRecord for the Ingress is updated with the expected Spec
-	test.Eventually(DNSRecord(test, namespace, name)).WithTimeout(TestTimeoutMedium).Should(And(
-		WithTransform(DNSRecordEndpoints, HaveLen(1)),
-		WithTransform(DNSRecordEndpoints, ContainElement(MatchFieldsP(IgnoreExtras,
-			Fields{
-				"DNSName":          Equal(ingress.Annotations[traffic.ANNOTATION_HCG_HOST]),
-				"Targets":          ConsistOf(ingressStatus.LoadBalancer.Ingress[0].IP),
-				"RecordType":       Equal("A"),
-				"RecordTTL":        Equal(kuadrantv1.TTL(60)),
-				"SetIdentifier":    Equal(ingressStatus.LoadBalancer.Ingress[0].IP),
-				"ProviderSpecific": ConsistOf(kuadrantv1.ProviderSpecific{{Name: "aws/weight", Value: "120"}}),
-			})),
-		),
-		WithTransform(DNSRecordCondition(zoneID, kuadrantv1.DNSRecordFailedConditionType), MatchFieldsP(IgnoreExtras,
-			Fields{
-				"Status":  Equal("False"),
-				"Reason":  Equal("ProviderSuccess"),
-				"Message": Equal("The DNS provider succeeded in ensuring the record"),
-			})),
-	))
-	// TODO(cbrookes) if we want to keep this test we need to get the certificate not the secret
-	//secret := GetSecret(test, namespace, ingress.Spec.TLS[0].SecretName)
-	// Ingress creation timestamp is serialized to RFC3339 format and set in an annotation on the certificate request
-	//duration := secret.CreationTimestamp.Sub(ingress.CreationTimestamp.Rfc3339Copy().Time).Seconds()
 
 	// Check the metrics
 	test.Expect(GetMetrics(test)).To(And(
@@ -234,16 +168,11 @@ func TestMetrics(t *testing.T) {
 				"Metric": ContainElement(certificateSecretCount(issuer, 1)),
 			},
 		)),
-		// TODO(cbrookes) need to get the certificate rather than the secret now
-		// HaveKey("glbc_tls_certificate_issuance_duration_seconds"),
-		// WithTransform(Metric("glbc_tls_certificate_issuance_duration_seconds"), EqualP(
-		// 	certificateIssuanceDurationSeconds(issuer, 1, duration),
-		// )),
 	))
 
-	// Wait for a period of time to allow all reconciliations to be completed
-	// ToDo (mnairn) Is there any way we can do an assertion on something to know we are at this point?
-	// Needs investigation into what is actually triggering a reconciliation after the DNSRecord is finished.
+	// // Wait for a period of time to allow all reconciliations to be completed
+	// // ToDo (mnairn) Is there any way we can do an assertion on something to know we are at this point?
+	// // Needs investigation into what is actually triggering a reconciliation after the DNSRecord is finished.
 	time.Sleep(30 * time.Second)
 
 	// Take a snapshot of the reconciliation metrics
@@ -290,10 +219,6 @@ func TestMetrics(t *testing.T) {
 		WithTransform(Metric("glbc_tls_certificate_request_errors_total"), EqualP(
 			certificateRequestErrorsTotal(issuer, 0)),
 		),
-		// HaveKey("glbc_tls_certificate_issuance_duration_seconds"),
-		// WithTransform(Metric("glbc_tls_certificate_issuance_duration_seconds"), EqualP(
-		// 	certificateIssuanceDurationSeconds(issuer, 1, duration),
-		// )),
 	))
 }
 

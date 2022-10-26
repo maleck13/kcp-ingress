@@ -83,6 +83,12 @@ e2e: build ## Run e2e tests.
 	KUBECONFIG="$(KUBECONFIG)" CLUSTERS_KUBECONFIG_DIR="$(CLUSTERS_KUBECONFIG_DIR)" \
 	go test -count=1 -timeout 60m -v ./test/e2e -tags=e2e
 
+
+.PHONY: e2e-ingress
+e2e-ingress: build
+	KUBECONFIG="$(KUBECONFIG)" CLUSTERS_KUBECONFIG_DIR="$(CLUSTERS_KUBECONFIG_DIR)" \
+	go test -count=1 -timeout 60m -v ./test/e2e/ingress_test.go -tags=e2e
+
 TEST_DNSRECORD_COUNT ?= 2
 TEST_INGRESS_COUNT ?= 2
 TEST_WORKSPACE_COUNT ?= 2

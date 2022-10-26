@@ -28,7 +28,6 @@ import (
 
 	"github.com/kcp-dev/logicalcluster/v2"
 
-	"github.com/kuadrant/kcp-glbc/pkg/_internal/env"
 	kuadrantv1 "github.com/kuadrant/kcp-glbc/pkg/apis/kuadrant/v1"
 	"github.com/kuadrant/kcp-glbc/pkg/traffic"
 	. "github.com/kuadrant/kcp-glbc/test/support"
@@ -92,7 +91,8 @@ func TestIngressBasic(t Test, ingressCount int, zoneID, glbcDomain string) {
 
 	t.T().Log(fmt.Sprintf("Creating %d Ingresses in %s", ingressCount, workspace.Name))
 
-	// Create Ingresses
+	// Create Ingresses store them as soon as they return from the create call to preserve spec
+	var createdIngresses []*networkingv1.Ingress
 	wg := sync.WaitGroup{}
 	for i := 1; i <= ingressCount; i++ {
 		wg.Add(1)
@@ -100,39 +100,35 @@ func TestIngressBasic(t Test, ingressCount int, zoneID, glbcDomain string) {
 			defer wg.Done()
 			ingress := createTestIngress(t, namespace, name)
 			t.Expect(ingress).NotTo(BeNil())
+			createdIngresses = append(createdIngresses, ingress)
 		}()
 	}
 	wg.Wait()
-
 	// Retrieve Ingresses
 	ingresses := GetIngresses(t, namespace, "")
 	t.Expect(ingresses).Should(HaveLen(ingressCount))
-
-	customHostsEnabled := env.GetEnvBool("GLBC_ENABLE_CUSTOM_HOSTS", false)
 	// Assert Ingresses reconcile success
-	for _, ingress := range ingresses {
-		tlsSecretName := fmt.Sprintf("hcg-tls-ingress-%s", ingress.Name)
-		t.Eventually(Ingress(t, namespace, ingress.Name)).WithTimeout(TestTimeoutMedium).Should(And(
+	for _, ingress := range createdIngresses {
+
+		t.Eventually(Ingress(t, namespace, ingress.Name)).WithTimeout(TestTimeoutShort).Should(And(
 			WithTransform(Annotations, And(
 				HaveKey(traffic.ANNOTATION_HCG_HOST),
 			)),
-			WithTransform(LoadBalancerIngresses, HaveLen(1)),
-			Satisfy(HostsEqualsToGeneratedHost),
-			Satisfy(HasTLSSecretForGeneratedHost(tlsSecretName)),
+			WithTransform(Labels, And(
+				HaveKey(traffic.LABEL_HAS_PENDING_HOSTS),
+			)),
+			// ensure the original spec has not changed
+			Satisfy(OriginalSpecUnchanged(t, &ingress.Spec)),
 		))
 
-		if customHostsEnabled {
-			t.Eventually(Ingress(t, namespace, ingress.Name)).WithTimeout(TestTimeoutMedium).Should(And(
-				WithTransform(Annotations, And(
-					HaveKey(traffic.ANNOTATION_PENDING_CUSTOM_HOSTS),
-				)),
-				WithTransform(Labels, And(
-					HaveKey(traffic.LABEL_HAS_PENDING_HOSTS),
-				)),
-			))
-		}
 	}
+	t.T().Log("ingress in correct state")
 
+	// Retrieve TLS Secrets
+	t.Eventually(Secrets(t, namespace, "kuadrant.dev/hcg.managed=true")).WithTimeout(
+		TestTimeoutLong).Should(HaveLen(ingressCount))
+
+	t.T().Log("tls in correct state")
 	// Retrieve DNSRecords
 	t.Eventually(DNSRecords(t, namespace, "")).Should(HaveLen(ingressCount))
 	dnsRecords := GetDNSRecords(t, namespace, "")
@@ -151,8 +147,28 @@ func TestIngressBasic(t Test, ingressCount int, zoneID, glbcDomain string) {
 		))
 	}
 
-	// Retrieve TLS Secrets
-	t.Eventually(Secrets(t, namespace, "kuadrant.dev/hcg.managed=true")).WithTimeout(
-		TestTimeoutLong).Should(HaveLen(ingressCount))
+	t.T().Log("DNS record in correct state")
+	ingresses = GetIngresses(t, namespace, "")
+	t.Expect(ingresses).Should(HaveLen(ingressCount))
+	// Assert Ingresses reconcile success now that cert and dns in place so the lb should be set to the generated host
+	for _, ingress := range ingresses {
+		tlsSecretName := fmt.Sprintf("hcg-tls-ingress-%s", ingress.Name)
+		generatedHost := ingress.Annotations[traffic.ANNOTATION_HCG_HOST]
+		t.T().Log("tls secret name ", tlsSecretName, "generated host ", generatedHost)
+		t.Eventually(Ingress(t, namespace, ingress.Name)).WithTimeout(TestTimeoutMedium).Should(And(
+			WithTransform(Annotations, And(
+				HaveKey(traffic.ANNOTATION_HCG_HOST),
+			)),
+			WithTransform(Labels, And(
+				HaveKey(traffic.LABEL_HAS_PENDING_HOSTS),
+			)),
+			WithTransform(LoadBalancerIngresses, HaveLen(1)),
+			//No custom hosts approved so only expect our default spec in the transform
+			Satisfy(TransformedSpec(t, GetDefaultSpec(generatedHost, tlsSecretName, name))),
+			Satisfy(LBHostEqualToGeneratedHost),
+		))
+	}
+
+	t.T().Log("Ingress reached correct final state")
 
 }

@@ -4,27 +4,28 @@
 package e2e
 
 import (
-	"encoding/json"
+	"crypto/x509/pkix"
 	"os"
-	"strings"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	workload "github.com/kcp-dev/kcp/pkg/apis/workload/v1alpha1"
+	"github.com/kuadrant/kcp-glbc/pkg/_internal/env"
+	"github.com/kuadrant/kcp-glbc/pkg/dns"
 	"github.com/kuadrant/kcp-glbc/pkg/traffic"
 
 	. "github.com/onsi/gomega"
 	. "github.com/onsi/gomega/gstruct"
+	"github.com/onsi/gomega/types"
 
 	"github.com/kcp-dev/logicalcluster/v2"
 	corev1 "k8s.io/api/core/v1"
-	networkingv1 "k8s.io/api/networking/v1"
 
 	kuadrantv1 "github.com/kuadrant/kcp-glbc/pkg/apis/kuadrant/v1"
 	. "github.com/kuadrant/kcp-glbc/test/support"
 )
 
+// TestIngress covers the main interactions with the ingress object. Assigning a GLBC host, custom domains transformations and TLS. It uses a dummy DNS provider
 func TestIngress(t *testing.T) {
 	test := With(t)
 	test.T().Parallel()
@@ -61,10 +62,12 @@ func TestIngress(t *testing.T) {
 			To(Succeed())
 	}()
 
-	// Create the Ingress
+	// Create the Ingress with a custom domain set
 	customHost := "test.gblb-custom.com"
-	_, err = test.Client().Core().Cluster(logicalcluster.From(namespace)).NetworkingV1().Ingresses(namespace.Name).
-		Apply(test.Ctx(), IngressConfiguration(namespace.Name, name, name, customHost), ApplyOptions)
+	ingConfig := IngressConfiguration(namespace.Name, name, name, customHost)
+	//store the original ingress before any reconciles happen
+	originalIngress, err := test.Client().Core().Cluster(logicalcluster.From(namespace)).NetworkingV1().Ingresses(namespace.Name).
+		Apply(test.Ctx(), ingConfig, ApplyOptions)
 	test.Expect(err).NotTo(HaveOccurred())
 
 	defer func() {
@@ -87,49 +90,122 @@ func TestIngress(t *testing.T) {
 			Delete(test.Ctx(), ConfigmapName, metav1.DeleteOptions{})).
 			To(Succeed())
 	}()
+	ingress := GetIngress(test, namespace, name)
+	secretName := traffic.TLSSecretName(ingress)
 
-	// Wait until the Ingress is reconciled with the load balancer Ingresses
+	// Test our annotations are as expected and that we have not modified the original spec
 	test.Eventually(Ingress(test, namespace, name)).WithTimeout(TestTimeoutMedium).Should(And(
 		WithTransform(Annotations, And(
 			HaveKey(traffic.ANNOTATION_HCG_HOST),
-			HaveKey(traffic.ANNOTATION_PENDING_CUSTOM_HOSTS),
 		)),
 		WithTransform(Labels, And(
 			HaveKey(traffic.LABEL_HAS_PENDING_HOSTS),
 		)),
-		WithTransform(LoadBalancerIngresses, HaveLen(1)),
-		Satisfy(HostsEqualsToGeneratedHost),
+		// ensure the original spec has not changed
+		Satisfy(OriginalSpecUnchanged(test, &originalIngress.Spec)),
 	))
-
-	// Retrieve the Ingress
-	ingress := GetIngress(test, namespace, name)
-
+	test.T().Log("ingress in expected state")
+	// now our ingress is in the expected state assert TLS, DNS and Transforms correct
+	ingress = GetIngress(test, namespace, name)
+	hostname := ingress.Annotations[traffic.ANNOTATION_HCG_HOST]
+	resolver := dns.ConfigMapHostResolver{}
 	zoneID := os.Getenv("AWS_DNS_PUBLIC_ZONE_ID")
 	test.Expect(zoneID).NotTo(BeNil())
 
-	ingressStatus := &networkingv1.IngressStatus{}
-	for a, v := range ingress.Annotations {
-		if strings.Contains(a, workload.InternalClusterStatusAnnotationPrefix) {
-			err = json.Unmarshal([]byte(v), &ingressStatus)
-			break
-		}
+	//TLS
+	issuer := env.GetEnvString("GLBC_TLS_PROVIDER", "glbc-ca")
+	fields := map[string]types.GomegaMatcher{
+		"DNSNames": ConsistOf(hostname),
 	}
+	switch issuer {
 
-	// Check a DNSRecord for the Ingress is created with the expected Spec
+	case "glbc-ca":
+		fields["Issuer"] = Equal(pkix.Name{
+			Organization: []string{"Kuadrant"},
+			Names: []pkix.AttributeTypeAndValue{
+				{
+					Type:  []int{2, 5, 4, 10},
+					Value: "Kuadrant",
+				},
+			},
+		})
+
+	case "le-staging":
+		fields["Issuer"] = Equal(pkix.Name{
+			Country:      []string{"US"},
+			Organization: []string{"(STAGING) Let's Encrypt"},
+			CommonName:   "(STAGING) Artificial Apricot R3",
+			Names: []pkix.AttributeTypeAndValue{
+				{
+					Type:  []int{2, 5, 4, 6},
+					Value: "US",
+				},
+				{
+					Type:  []int{2, 5, 4, 10},
+					Value: "(STAGING) Let's Encrypt",
+				},
+				{
+					Type:  []int{2, 5, 4, 3},
+					Value: "(STAGING) Artificial Apricot R3",
+				},
+			},
+		})
+		fields["Subject"] = Equal(pkix.Name{
+			CommonName: hostname,
+			Names: []pkix.AttributeTypeAndValue{
+				{
+					Type:  []int{2, 5, 4, 3},
+					Value: hostname,
+				},
+			},
+		})
+
+	case "le-production":
+		fields["Issuer"] = Equal(pkix.Name{
+			Country:      []string{"US"},
+			Organization: []string{"Let's Encrypt"},
+			CommonName:   "Artificial Apricot R3",
+			Names: []pkix.AttributeTypeAndValue{
+				{
+					Type:  []int{2, 5, 4, 6},
+					Value: "US",
+				},
+				{
+					Type:  []int{2, 5, 4, 10},
+					Value: "Let's Encrypt",
+				},
+				{
+					Type:  []int{2, 5, 4, 3},
+					Value: "R3",
+				},
+			},
+		})
+		fields["Subject"] = Equal(pkix.Name{
+			CommonName: hostname,
+			Names: []pkix.AttributeTypeAndValue{
+				{
+					Type:  []int{2, 5, 4, 3},
+					Value: hostname,
+				},
+			},
+		})
+	}
+	// check our tls secret exists and is correct
+	test.Eventually(Secret(test, namespace, secretName)).
+		WithTimeout(TestTimeoutShort).
+		Should(WithTransform(Labels, And(
+			HaveKeyWithValue("kuadrant.dev/hcg.managed", "true"),
+		)),
+			WithTransform(Certificate, PointTo(MatchFields(IgnoreExtras, fields))))
+
+	test.T().Log("tls secret exists and is correctly configured")
+
+	// DNS Check a DNSRecord for the Ingress is created with the expected Spec
 	test.Eventually(DNSRecord(test, namespace, name)).Should(And(
 		// ensure the ingress certificate is marked as ready when the DNSrecord is created
 		WithTransform(DNSRecordToIngressCertReady(test, namespace, name), Equal("ready")),
 		WithTransform(DNSRecordEndpoints, HaveLen(1)),
-		WithTransform(DNSRecordEndpoints, ContainElement(MatchFieldsP(IgnoreExtras,
-			Fields{
-				"DNSName":          Equal(ingress.Annotations[traffic.ANNOTATION_HCG_HOST]),
-				"Targets":          ConsistOf(ingressStatus.LoadBalancer.Ingress[0].IP),
-				"RecordType":       Equal("A"),
-				"RecordTTL":        Equal(kuadrantv1.TTL(60)),
-				"SetIdentifier":    Equal(ingressStatus.LoadBalancer.Ingress[0].IP),
-				"ProviderSpecific": ConsistOf(kuadrantv1.ProviderSpecific{{Name: "aws/weight", Value: "120"}}),
-			})),
-		),
+		WithTransform(DNSRecordEndpoints, ContainElements(IngressEndpoints(test, ingress, &resolver))),
 		WithTransform(DNSRecordCondition(zoneID, kuadrantv1.DNSRecordFailedConditionType), MatchFieldsP(IgnoreExtras,
 			Fields{
 				"Status":  Equal("False"),
@@ -137,6 +213,18 @@ func TestIngress(t *testing.T) {
 				"Message": Equal("The DNS provider succeeded in ensuring the record"),
 			})),
 	))
+	test.T().Log("DNS is as expected")
+	glbcHost := ingress.Annotations[traffic.ANNOTATION_HCG_HOST]
+
+	// Test that our transforms have the expected spec and that our status is set to the generated host
+	test.Eventually(Ingress(test, namespace, name)).WithTimeout(TestTimeoutShort).Should(And(
+		Satisfy(OriginalSpecUnchanged(test, &originalIngress.Spec)),
+		Satisfy(TransformedSpec(test, GetDefaultSpec(glbcHost, secretName, name))),
+		//check that we have a LB set to our generated host
+		WithTransform(LoadBalancerIngresses, HaveLen(1)),
+		Satisfy(LBHostEqualToGeneratedHost),
+	))
+	test.T().Log("transforms are in place and ingress is ready (dns load balancer is set in the status)")
 
 	// Create a domain verification for the custom domain
 	test.Client().Kuadrant().Cluster(logicalcluster.From(ingress)).KuadrantV1().DomainVerifications().Create(test.Ctx(), &kuadrantv1.DomainVerification{
@@ -161,11 +249,11 @@ func TestIngress(t *testing.T) {
 	))
 
 	// see custom host is not active in ingress
-	// see custom host is in pending annotation
 	test.Eventually(Ingress(test, namespace, name)).WithTimeout(TestTimeoutMedium).Should(And(
-		WithTransform(IngressHosts, Not(ContainElement(customHost))),
-		WithTransform(IngressPendingHosts, ContainElement(customHost)),
+		Satisfy(OriginalSpecUnchanged(test, &originalIngress.Spec)),
+		Satisfy(TransformedSpec(test, GetDefaultSpec(glbcHost, secretName, name))),
 	))
+	test.T().Log("domain not verified custom host not propigated to cluster")
 
 	// get domainVerification in order to read required token
 	dv, err := test.Client().Kuadrant().Cluster(logicalcluster.From(ingress)).KuadrantV1().DomainVerifications().Get(test.Ctx(), customHost, metav1.GetOptions{})
@@ -176,16 +264,23 @@ func TestIngress(t *testing.T) {
 	test.Expect(err).NotTo(HaveOccurred())
 
 	// see domain verification is verified
-	test.Eventually(DomainVerification(test, logicalcluster.From(ingress), customHost)).WithTimeout(TestTimeoutMedium).Should(And(
+	test.Eventually(DomainVerification(test, logicalcluster.From(ingress), customHost)).WithTimeout(TestTimeoutShort).Should(And(
 		WithTransform(DomainVerificationFor, Equal(customHost)),
 		WithTransform(DomainVerified, Equal(true)),
 		WithTransform(DomainToken, Equal(dv.Status.Token)),
 	))
+	test.T().Log("domain is now verified")
+	withCustomDomain := GetDefaultSpec(glbcHost, secretName, name)
+	//bit nasty but do it this way as this is how it is appended in the reconcile and the order matters for matching
+	originalIngress.Spec.Rules = append(originalIngress.Spec.Rules, withCustomDomain.Rules...)
+	withCustomDomain.Rules = originalIngress.Spec.Rules
+	originalIngress.Spec.TLS = append(originalIngress.Spec.TLS, withCustomDomain.TLS...)
+	withCustomDomain.TLS = originalIngress.Spec.TLS
 
-	// see custom host is active in ingress
-	// see custom host cleared from pending annotations
-	test.Eventually(Ingress(test, namespace, name)).WithTimeout(TestTimeoutMedium).Should(And(
-		WithTransform(IngressPendingHosts, Not(ContainElement(customHost))),
-		WithTransform(IngressHosts, ContainElement(customHost)),
+	// now we have built up our expected transformed spec check it is the same as the transformations applied to the annotations
+	test.Eventually(Ingress(test, namespace, name)).WithTimeout(TestTimeoutShort).Should(And(
+		Satisfy(TransformedSpec(test, withCustomDomain)),
 	))
+
+	test.T().Log("ingress is transformed correctly and in final state")
 }
